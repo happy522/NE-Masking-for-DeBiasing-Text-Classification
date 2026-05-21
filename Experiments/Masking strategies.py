@@ -208,7 +208,8 @@ ENTITY_POOLS = build_entity_pools([germeval_clean, hasoc_clean, gahd_clean])
 # ============================================================
 
 STRATEGIES = [
-    "PER_GENERIC_ENTITY",      # replace PER/PERSON with [ENTITY]
+    "PER_ORG_LOC_GENERIC_ENTITY",      # replace PER/PERSON with [ENTITY]
+    "PER_ONLY",                # replace PER with [PER]
     "ORG_ONLY",                # replace ORG with [ORG]
     "LOC_ONLY",                # replace LOC/GPE with [LOC]
     "PER_ORG_LOC_TYPED",       # replace PER-> [PER], ORG-> [ORG], LOC-> [LOC]
@@ -217,7 +218,8 @@ STRATEGIES = [
 ]
 
 STRATEGY_FILE_TAGS = {
-    "PER_GENERIC_ENTITY": "per_generic_entity",
+    "PER_ORG_LOC_GENERIC_ENTITY": "per_org_loc_generic_entity",
+    "PER_ONLY": "per_only",
     "ORG_ONLY": "org_only",
     "LOC_ONLY": "loc_only",
     "PER_ORG_LOC_TYPED": "per_org_loc_typed",
@@ -250,9 +252,17 @@ def apply_strategy_to_text(text, strategy, rng, entity_pools):
     for ent in doc.ents:
         replacement = None
 
-        if strategy == "PER_GENERIC_ENTITY":
+        if strategy == "PER_ORG_LOC_GENERIC_ENTITY":
             if ent.label_ in PERSON_LABELS:
                 replacement = "[ENTITY]"
+            elif ent.label_ in ORG_LABELS:
+                replacement = "[ENTITY]"
+            elif ent.label_ in LOC_LABELS:
+                replacement = "[ENTITY]"
+
+        elif strategy == "PER_ONLY":
+            if ent.label_ in PERSON_LABELS:
+                replacement = "[PER]"
 
         elif strategy == "ORG_ONLY":
             if ent.label_ in ORG_LABELS:
