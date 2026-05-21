@@ -210,11 +210,11 @@ ENTITY_POOLS = build_entity_pools([germeval_clean, hasoc_clean, gahd_clean])
 STRATEGIES = [
     "PER_ORG_LOC_GENERIC_ENTITY",      # replace PER/PERSON with [ENTITY]
     "PER_ONLY",                # replace PER with [PER]
-    "ORG_ONLY",                # replace ORG with [ORG]
-    "LOC_ONLY",                # replace LOC/GPE with [LOC]
-    "PER_ORG_LOC_TYPED",       # replace PER-> [PER], ORG-> [ORG], LOC-> [LOC]
-    "X_LENGTH",                # replace PER/ORG/LOC with X repeated char-length
-    "RANDOM_SUBSTITUTION"      # replace with random entity from same type pool
+    #"ORG_ONLY",                # replace ORG with [ORG]
+    #"LOC_ONLY",                # replace LOC/GPE with [LOC]
+    #"PER_ORG_LOC_TYPED",       # replace PER-> [PER], ORG-> [ORG], LOC-> [LOC]
+    #"X_LENGTH",                # replace PER/ORG/LOC with X repeated char-length
+    #"RANDOM_SUBSTITUTION"      # replace with random entity from same type pool
 ]
 
 STRATEGY_FILE_TAGS = {
