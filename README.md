@@ -65,5 +65,196 @@ The dataset includes **10,996 German-language texts**, combining authentic socia
 - Domain: Social media + synthetic adversarial examples
 - Task: Robust hate speech detection
 - Size: 10,996 samples
+Here is a **professional GitHub README** version of your masking strategy description. It is structured, publication-ready, and written in a formal tone.
+
+---
+
+## Entity Masking Strategies
+
+Seven distinct masking strategies are implemented. Each strategy modifies named entities in the input text in a different way.
+
+---
+
+## 1. Generic Entity Masking (PER_ORG_LOC_GENERIC_ENTITY)
+
+### Description
+
+All named entities belonging to Person, Organization, or Location categories are replaced with a single generic placeholder token.
+
+### Transformation Rule
+
+* PER → `[ENTITY]`
+* ORG → `[ENTITY]`
+* LOC/GPE → `[ENTITY]`
+
+### Example
+
+**Original:**
+
+> Angela Merkel visited Berlin and met Siemens executives.
+
+**Masked:**
+
+> [ENTITY] visited [ENTITY] and met [ENTITY] executives.
+
+### Objective
+
+This strategy removes all entity-specific identity information while preserving sentence structure. It evaluates whether models rely on named entities as predictive shortcuts.
+
+---
+
+## 2. Person Masking (PER_ONLY)
+
+### Description
+
+Only Person entities are replaced with a placeholder token.
+
+### Transformation Rule
+
+* PER → `[PER]`
+
+### Example
+
+**Original:**
+
+> Angela Merkel visited Berlin.
+
+**Masked:**
+
+> [PER] visited Berlin.
+
+### Objective
+
+This isolates the contribution of person names in classification decisions and evaluates potential person-specific bias.
+
+---
+
+## 3. Organization Masking (ORG_ONLY)
+
+### Description
+
+Only Organization entities are masked.
+
+### Transformation Rule
+
+* ORG → `[ORG]`
+
+### Example
+
+**Original:**
+
+> Angela Merkel met Siemens executives.
+
+**Masked:**
+
+> Angela Merkel met [ORG] executives.
+
+### Objective
+
+This examines whether organization names influence classification performance or introduce dataset-specific bias.
+
+---
+
+## 4. Location Masking (LOC_ONLY)
+
+### Description
+
+Only location entities are replaced.
+
+### Transformation Rule
+
+* LOC/GPE → `[LOC]`
+
+### Example
+
+**Original:**
+
+> Angela Merkel visited Berlin.
+
+**Masked:**
+
+> Angela Merkel visited [LOC].
+
+### Objective
+
+This evaluates the role of geographic information in model predictions and potential regional bias effects.
+
+---
+
+## 5. Typed Entity Masking (PER_ORG_LOC_TYPED)
+
+### Description
+
+Each entity type is replaced with a type-specific token, preserving coarse entity information while removing identity.
+
+### Transformation Rule
+
+* PER → `[PER]`
+* ORG → `[ORG]`
+* LOC/GPE → `[LOC]`
+
+### Example
+
+**Original:**
+
+> Angela Merkel visited Berlin and met Siemens.
+
+**Masked:**
+
+> [PER] visited [LOC] and met [ORG].
+
+### Objective
+
+This approach preserves entity structure while removing identity. It allows the model to distinguish entity types without memorizing specific entities.
+
+---
+
+## 6. Length-Preserving Masking (X_LENGTH)
+
+### Description
+
+Each named entity is replaced by a string of "X" characters matching the original entity length.
+
+### Transformation Rule
+
+* Entity → `"X" * len(entity)`
+
+### Example
+
+**Original:**
+
+> Berlin
+
+**Masked:**
+
+> XXXXXX
+
+### Objective
+
+This preserves surface-level length characteristics while removing semantic meaning. It helps determine whether models exploit token length patterns.
+
+---
+
+## 7. Random Entity Substitution (RANDOM_SUBSTITUTION)
+
+### Description
+
+Each named entity is replaced with a randomly sampled entity of the same type from the dataset-wide entity pool.
+
+### Transformation Rule
+
+* PER → random PER entity
+* ORG → random ORG entity
+* LOC → random LOC entity
+
+### Example
+
+**Original:**
+
+> Angela Merkel visited Berlin.
+
+**Masked:**
+
+> Olaf Scholz visited Munich.
 
 ---
