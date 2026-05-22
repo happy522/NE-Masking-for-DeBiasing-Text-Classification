@@ -5,7 +5,7 @@
 # ============================================================
 #torchrun --nproc_per_node=4 test5_3.py 2>&1 | tee training_5_3.log
 
-#torchrun python -m test5_3.py 2>&1 | tee training_5_3.log
+#nohup torchrun python -m test5_5.py 2>&1 | tee training_5_5.log
 #ctrl b and d
 # ============================================================
 # 1. IMPORTS
@@ -46,11 +46,11 @@ from sklearn.metrics import (
 SEED = 42
 
 MODELS = {
-    "BERT_GERMAN": "bert-base-german-cased",
-    "XLM_ROBERTA": "xlm-roberta-base",
-    "XLM_ROBERTA_LARGE": "xlm-roberta-large",
-    "GELECTRA_BASE": "deepset/gelectra-base",
-    #"GBERT": "deepset/gbert-base",
+    #"BERT_GERMAN": "bert-base-german-cased",
+    #"XLM_ROBERTA": "xlm-roberta-base",
+    #"XLM_ROBERTA_LARGE": "xlm-roberta-large",
+    #"GELECTRA_BASE": "deepset/gelectra-base",
+    "GBERT": "deepset/gbert-base",
 }
 
 MAX_LENGTH = 128
@@ -96,6 +96,10 @@ hasoc_raw = pd.read_csv(
 gahd_raw = pd.read_csv(
     "https://raw.githubusercontent.com/happy522/NE-Masking-for-DeBiasing-Text-Classification/refs/heads/main/Dataset/GAHD.csv"
 )
+ger_train_df = pd.read_csv("https://raw.githubusercontent.com/happy522/NE-Masking-for-DeBiasing-Text-Classification/refs/heads/main/Dataset/germeval2018_train.csv")
+ger_test_df = pd.read_csv("https://raw.githubusercontent.com/happy522/NE-Masking-for-DeBiasing-Text-Classification/refs/heads/main/Dataset/germeval2018_test.csv")
+has_train_df = pd.read_csv("https://raw.githubusercontent.com/happy522/NE-Masking-for-DeBiasing-Text-Classification/refs/heads/main/Dataset/hasoc_german_train.csv")
+has_test_df = pd.read_csv("https://raw.githubusercontent.com/happy522/NE-Masking-for-DeBiasing-Text-Classification/refs/heads/main/Dataset/hasoc_german_test.csv")
 
 # ============================================================
 # 5. TEXT CLEANING
@@ -124,6 +128,10 @@ def clean_dataframe(df):
 germeval_clean = clean_dataframe(germeval_raw)
 hasoc_clean = clean_dataframe(hasoc_raw)
 gahd_clean = clean_dataframe(gahd_raw)
+ger_train_df = clean_dataframe(ger_train_df)
+ger_test_df = clean_dataframe(ger_test_df)
+has_train_df = clean_dataframe(has_train_df)
+has_test_df = clean_dataframe(has_test_df)
 
 SOURCE_DFS = {
     "GERMEVAL": germeval_clean,
@@ -210,11 +218,11 @@ ENTITY_POOLS = build_entity_pools([germeval_clean, hasoc_clean, gahd_clean])
 STRATEGIES = [
     "PER_ORG_LOC_GENERIC_ENTITY",      # replace PER/PERSON with [ENTITY]
     "PER_ONLY",                # replace PER with [PER]
-    #"ORG_ONLY",                # replace ORG with [ORG]
-    #"LOC_ONLY",                # replace LOC/GPE with [LOC]
-    #"PER_ORG_LOC_TYPED",       # replace PER-> [PER], ORG-> [ORG], LOC-> [LOC]
-    #"X_LENGTH",                # replace PER/ORG/LOC with X repeated char-length
-    #"RANDOM_SUBSTITUTION"      # replace with random entity from same type pool
+    "ORG_ONLY",                # replace ORG with [ORG]
+    "LOC_ONLY",                # replace LOC/GPE with [LOC]
+    "PER_ORG_LOC_TYPED",       # replace PER-> [PER], ORG-> [ORG], LOC-> [LOC]
+    "X_LENGTH",                # replace PER/ORG/LOC with X repeated char-length
+    "RANDOM_SUBSTITUTION"      # replace with random entity from same type pool
 ]
 
 STRATEGY_FILE_TAGS = {
@@ -336,26 +344,29 @@ def prepare(ds, tokenizer):
 
 EXPERIMENTS = [
     # GERMEVAL AS SOURCE
-    ("GERMEVAL", "train_70", "GERMEVAL", "test_30"),
+    ("GERMEVAL", "train", "GERMEVAL", "test"),
+    
+    ("HASOC", "train", "HASOC", "test"),
+    
+    ("GAHD", "train", "GAHD", "test"),
+
     ("GERMEVAL", "full", "HASOC", "full"),
     ("GERMEVAL", "full", "GAHD", "full"),
     ("GERMEVAL", "full", "HASOC+GAHD", "HASOC+GAHD"),
 
     # HASOC AS SOURCE
-    ("HASOC", "train_70", "HASOC", "test_30"),
     ("HASOC", "full", "GERMEVAL", "full"),
     ("HASOC", "full", "GAHD", "full"),
     ("HASOC", "full", "GERMEVAL+GAHD", "GERMEVAL+GAHD"),
 
     # GAHD AS SOURCE
-    ("GAHD", "train_70", "GAHD", "test_30"),
     ("GAHD", "full", "GERMEVAL", "full"),
     ("GAHD", "full", "HASOC", "full"),
     ("GAHD", "full", "HASOC+GERMEVAL", "HASOC+GERMEVAL"),
 ]
 
 def get_dataset(dataset_name, split, dataset_registry, combined_tests):
-    if split in ["train_70", "test_30", "full"]:
+    if split in ["train", "test", "full"]:
         return dataset_registry[dataset_name][split]
     return combined_tests[split]
 
@@ -449,7 +460,7 @@ def train_eval(model_name, train_ds, test_ds, train_name, test_name, strategy_na
 # ============================================================
 
 all_strategy_results = []
-
+os.makedirs("gbert", exist_ok=True)
 for strategy_idx, strategy_name in enumerate(STRATEGIES):
     print("\n" + "#" * 110)
     print(f"MASKING STRATEGY: {strategy_name}")
@@ -472,8 +483,8 @@ for strategy_idx, strategy_name in enumerate(STRATEGIES):
     # CREATE STRATEGY-SPECIFIC SPLITS
     # --------------------------------------------------------
 
-    ger_train_df, ger_test_df = split_df(transformed_full["GERMEVAL"])
-    has_train_df, has_test_df = split_df(transformed_full["HASOC"])
+    #ger_train_df, ger_test_df = split_df(transformed_full["GERMEVAL"]) we already have official splits for GERMEVAL, so we will use those instead of re-splitting
+    #has_train_df, has_test_df = split_df(transformed_full["HASOC"])
     gahd_train_df, gahd_test_df = split_df(transformed_full["GAHD"])
 
     # --------------------------------------------------------
@@ -482,18 +493,18 @@ for strategy_idx, strategy_name in enumerate(STRATEGIES):
 
     dataset_registry = {
         "GERMEVAL": {
-            "train_70": to_dataset(ger_train_df),
-            "test_30": to_dataset(ger_test_df),
+            "train": to_dataset(ger_train_df),
+            "test": to_dataset(ger_test_df),
             "full": to_dataset(transformed_full["GERMEVAL"])
         },
         "HASOC": {
-            "train_70": to_dataset(has_train_df),
-            "test_30": to_dataset(has_test_df),
+            "train": to_dataset(has_train_df),
+            "test": to_dataset(has_test_df),
             "full": to_dataset(transformed_full["HASOC"])
         },
         "GAHD": {
-            "train_70": to_dataset(gahd_train_df),
-            "test_30": to_dataset(gahd_test_df),
+            "train": to_dataset(gahd_train_df),
+            "test": to_dataset(gahd_test_df),
             "full": to_dataset(transformed_full["GAHD"])
         }
     }
@@ -552,12 +563,12 @@ for strategy_idx, strategy_name in enumerate(STRATEGIES):
 
     strategy_df = pd.DataFrame(strategy_results)
     strategy_df.to_csv(
-        f"german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv",
+        f"gbert/german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv",
         index=False
     )
 
     print("\nSaved:")
-    print(f"german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv")
+    print(f"gbert/german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv")
 
     all_strategy_results.append(strategy_df)
 
@@ -571,9 +582,9 @@ print("\nFINAL RESULTS")
 print(master_results)
 
 master_results.to_csv(
-    "german_hate_speech_results_ALL_MASKING_STRATEGIES.csv",
+    "gbert/german_hate_speech_results_ALL_MASKING_STRATEGIES.csv",
     index=False
 )
 
 print("\nSaved:")
-print("german_hate_speech_results_ALL_MASKING_STRATEGIES.csv")
+print("gbert/german_hate_speech_results_ALL_MASKING_STRATEGIES.csv")
