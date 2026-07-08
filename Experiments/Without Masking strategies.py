@@ -28,6 +28,12 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 SEED = 42
 
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 MODELS = {
     "BERT_GERMAN": "bert-base-german-cased",
     "XLM_ROBERTA": "xlm-roberta-base",

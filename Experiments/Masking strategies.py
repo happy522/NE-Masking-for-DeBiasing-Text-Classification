@@ -5,8 +5,11 @@
 # ============================================================
 #torchrun --nproc_per_node=4 test5_3.py 2>&1 | tee training_5_3.log
 
-#nohup torchrun python -m test5_5.py 2>&1 | tee training_5_5.log
-#ctrl b and d
+#set cuda device = 0
+#CUDA_VISIBLE_DEVICES=0 nohup torchrun test5_8.py 2>&1 | tee training_5_8.log
+#nohup python test5_7.py > training_5_7.log 2>&1 &
+
+#watch -n 2 tail -n 20 training_5_7.log
 # ============================================================
 # 1. IMPORTS
 # ============================================================
@@ -73,9 +76,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Install if needed:
 #   pip install spacy
-#   python -m spacy download de_core_news_sm
+#   python -m spacy download de_core_news_lg
 
-nlp = spacy.load("de_core_news_sm")
+nlp = spacy.load("de_core_news_lg", disable=["parser", "tagger", "lemmatizer"])
 
 PERSON_LABELS = {"PER", "PERSON"}
 ORG_LABELS = {"ORG"}
@@ -136,7 +139,11 @@ has_test_df = clean_dataframe(has_test_df)
 SOURCE_DFS = {
     "GERMEVAL": germeval_clean,
     "HASOC": hasoc_clean,
-    "GAHD": gahd_clean
+    "GAHD": gahd_clean,
+    "GERMEVAL_TRAIN": ger_train_df,
+    "GERMEVAL_TEST": ger_test_df,
+    "HASOC_TRAIN": has_train_df,
+    "HASOC_TEST": has_test_df
 }
 
 # ============================================================
@@ -162,6 +169,8 @@ def unique_preserve_order(items):
             seen.add(item)
             out.append(item)
     return out
+
+
 
 # ============================================================
 # 7. ENTITY POOLS FOR RANDOM SUBSTITUTION
@@ -216,6 +225,7 @@ ENTITY_POOLS = build_entity_pools([germeval_clean, hasoc_clean, gahd_clean])
 # ============================================================
 
 STRATEGIES = [
+    #"None",                   # no masking, use cleaned text as-is
     "PER_ORG_LOC_GENERIC_ENTITY",      # replace PER/PERSON with [ENTITY]
     "PER_ONLY",                # replace PER with [PER]
     "ORG_ONLY",                # replace ORG with [ORG]
@@ -226,6 +236,7 @@ STRATEGIES = [
 ]
 
 STRATEGY_FILE_TAGS = {
+    #"None": "none",
     "PER_ORG_LOC_GENERIC_ENTITY": "per_org_loc_generic_entity",
     "PER_ONLY": "per_only",
     "ORG_ONLY": "org_only",
@@ -252,6 +263,8 @@ def sample_replacement(current_text, pool, rng):
 
 def apply_strategy_to_text(text, strategy, rng, entity_pools):
     if not text:
+        return text
+    if strategy == "None":
         return text
 
     doc = nlp(text)
@@ -375,11 +388,17 @@ def get_dataset(dataset_name, split, dataset_registry, combined_tests):
 # ============================================================
 
 def train_eval(model_name, train_ds, test_ds, train_name, test_name, strategy_name, results):
+    special_tokens = {
+        "additional_special_tokens": ["[PER]", "[ORG]", "[LOC]", "[ENTITY]"]
+    }
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.add_special_tokens(special_tokens)
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name,
         num_labels=2
     )
+    model.resize_token_embeddings(len(tokenizer))
     model.to(device)
 
     train_ds_p = prepare(train_ds, tokenizer)
@@ -460,14 +479,45 @@ def train_eval(model_name, train_ds, test_ds, train_name, test_name, strategy_na
 # ============================================================
 
 all_strategy_results = []
-os.makedirs("gbert", exist_ok=True)
+os.makedirs("final_results", exist_ok=True)
 for strategy_idx, strategy_name in enumerate(STRATEGIES):
+    
     print("\n" + "#" * 110)
     print(f"MASKING STRATEGY: {strategy_name}")
     print("#" * 110)
 
     # Use a stable RNG per strategy
     rng = random.Random(SEED + (strategy_idx * 1000))
+
+    transformed_ger_train = transform_dataframe(
+        ger_train_df,
+        strategy_name,
+        rng,
+        ENTITY_POOLS
+    )
+
+    transformed_ger_test = transform_dataframe(
+        ger_test_df,
+        strategy_name,
+        rng,
+        ENTITY_POOLS
+    )
+
+    transformed_has_train = transform_dataframe(
+        has_train_df,
+        strategy_name,
+        rng,
+        ENTITY_POOLS
+    )
+
+    transformed_has_test = transform_dataframe(
+        has_test_df,
+        strategy_name,
+        rng,
+        ENTITY_POOLS
+    )
+
+
 
     # --------------------------------------------------------
     # APPLY STRATEGY TO FULL DATASETS
@@ -493,20 +543,22 @@ for strategy_idx, strategy_name in enumerate(STRATEGIES):
 
     dataset_registry = {
         "GERMEVAL": {
-            "train": to_dataset(ger_train_df),
-            "test": to_dataset(ger_test_df),
+            "train": to_dataset(transformed_ger_train),
+            "test": to_dataset(transformed_ger_test),
             "full": to_dataset(transformed_full["GERMEVAL"])
         },
         "HASOC": {
-            "train": to_dataset(has_train_df),
-            "test": to_dataset(has_test_df),
+            "train": to_dataset(transformed_has_train),
+            "test": to_dataset(transformed_has_test),
             "full": to_dataset(transformed_full["HASOC"])
         },
         "GAHD": {
             "train": to_dataset(gahd_train_df),
             "test": to_dataset(gahd_test_df),
             "full": to_dataset(transformed_full["GAHD"])
-        }
+        },
+    
+        
     }
 
     combined_tests = {
@@ -563,12 +615,12 @@ for strategy_idx, strategy_name in enumerate(STRATEGIES):
 
     strategy_df = pd.DataFrame(strategy_results)
     strategy_df.to_csv(
-        f"gbert/german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv",
+        f"final_results/german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv",
         index=False
     )
 
     print("\nSaved:")
-    print(f"gbert/german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv")
+    print(f"final_results/german_hate_speech_results_{STRATEGY_FILE_TAGS[strategy_name]}.csv")
 
     all_strategy_results.append(strategy_df)
 
@@ -582,9 +634,9 @@ print("\nFINAL RESULTS")
 print(master_results)
 
 master_results.to_csv(
-    "gbert/german_hate_speech_results_ALL_MASKING_STRATEGIES.csv",
+    "final_results/german_hate_speech_results_ALL_MASKING_STRATEGIES.csv",
     index=False
 )
 
 print("\nSaved:")
-print("gbert/german_hate_speech_results_ALL_MASKING_STRATEGIES.csv")
+print("final_results/german_hate_speech_results_ALL_MASKING_STRATEGIES.csv")
