@@ -2,40 +2,52 @@
 # HATE SPEECH CLASSIFICATION - ZERO-SHOT LEARNING
 # GERMAN DATASETS: GERMEVAL, HASOC, GAHD
 #
-# Model: mistral-large-3-675b-instruct-2512 via SAIA API
-# (OpenAI-compatible endpoint, https://chat-ai.academiccloud.de/v1)
+# Model: joeddav/xlm-roberta-large-xnli (local, via HF `transformers`
+# zero-shot-classification pipeline, running on GPU)
 #
-# PARALLEL VERSION:
-#   - Uses 2 API keys round-robin to roughly double throughput
-#   - Classifies documents concurrently with a thread pool
-#     (this workload is I/O-bound: almost all the wall-clock
-#     time is spent waiting on the API, not on local CPU, so
-#     threads work fine here - no need for multiprocessing)
+# LOCAL-MODEL VERSION (replaces the previous SAIA-API version):
+#   - No API keys / network calls for classification anymore -
+#     the model runs locally, so all the API-key / round-robin /
+#     thread-pool machinery has been removed.
+#   - Classification is instead batched: all texts for a given
+#     (dataset, strategy) combo are handed to the HF pipeline at
+#     once, which internally batches them onto the GPU
+#     (see BATCH_SIZE below). This is the "parallelism" now -
+#     there's no I/O wait to hide behind threads, so threading
+#     wouldn't help here.
 #   - Batches spaCy NER with nlp.pipe instead of per-row .apply
-#   - Runs on the FULL dataset (MAX_SAMPLES_PER_DATASET = None)
+#     (unchanged from before).
+#   - Adds an "UNMASKED" strategy (alongside the 7 masking
+#     strategies) that sends the raw, unmasked text - useful as
+#     a baseline to compare all the masking strategies against.
+#   - Runs on the FULL dataset when MAX_SAMPLES_PER_DATASET = None.
 #
 # No training happens here. Every document in every dataset is
-# masked according to one of the 7 strategies (or left unmasked)
-# and sent straight to the LLM with a zero-shot prompt.
+# masked according to one of the 7 masking strategies (or left
+# unmasked) and classified zero-shot against two candidate labels.
 #
 # Install once:
-#   pip install openai spacy pandas scikit-learn emoji
+#   pip install transformers torch spacy pandas scikit-learn emoji
 #   python -m spacy download de_core_news_lg
+#
+# NOTE: joeddav/xlm-roberta-large-xnli is a large (~2.2GB) model.
+# Make sure you have a CUDA-capable GPU with enough free VRAM
+# (a few GB is generally enough for inference at modest batch
+# sizes). The script falls back to CPU automatically if no GPU
+# is found, but that will be much slower.
 # ============================================================
 
 import os
 import re
-import json
-import time
 import random
-import concurrent.futures
 
 import emoji
 import numpy as np
 import pandas as pd
 import spacy
+import torch
 
-from openai import OpenAI
+from transformers import pipeline
 
 from sklearn.metrics import (
     accuracy_score,
@@ -53,46 +65,44 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
-# Put your keys in environment variables instead of hardcoding them:
-#   export SAIA_API_KEY_1="your_first_key_here"
-#   export SAIA_API_KEY_2="your_second_key_here"
-# (Your original script had one key hardcoded as a fallback - avoid
-# committing real keys to source, even for internal/research code.)
-API_KEY_1 = os.environ.get("SAIA_API_KEY_1", "256a34825e9fbf26a3d9e31c096a0c86")
-API_KEY_2 = os.environ.get("SAIA_API_KEY_2", "57445dacfe7afa67232c1b82ea596532")
+MODEL_NAME = "joeddav/xlm-roberta-large-xnli"
 
-API_BASE_URL = "https://chat-ai.academiccloud.de/v1"
-MODEL_NAME = "mistral-large-3-675b-instruct-2512"
+# German candidate labels + hypothesis template. xlm-roberta-large-xnli
+# is multilingual, so we phrase the hypothesis in German to match the
+# domain (German social media text) as closely as possible.
+CANDIDATE_LABELS = ["Hassrede", "keine Hassrede"]
+HYPOTHESIS_TEMPLATE = "Dieser Text ist {}."
 
-_raw_keys = [API_KEY_1, API_KEY_2]
-API_KEYS = [k for k in _raw_keys if k]
-
-if len(API_KEYS) == 0:
-    raise RuntimeError("No API keys found. Set SAIA_API_KEY_1 (and optionally SAIA_API_KEY_2).")
-
-CLIENTS = [OpenAI(api_key=k, base_url=API_BASE_URL) for k in API_KEYS]
-print(f"Using {len(CLIENTS)} API key(s) for classification.")
-
-# Set an integer (e.g. 200) while testing so you don't burn time/quota
+# Set an integer (e.g. 200) while testing so you don't burn time
 # on the full datasets. Set to None to run everything.
-MAX_SAMPLES_PER_DATASET = 200  # <- full dataset, as requested
+MAX_SAMPLES_PER_DATASET = None  # <- set to None for the full dataset
 
-# Seconds to wait between API calls submitted by a single worker.
-# Usually 0 is fine once you're parallelizing; raise it if you see
-# rate-limit errors.
-REQUEST_DELAY = 0.0
-
-# Retries per document if the API call fails or the answer is unparseable
-MAX_RETRIES = 5
-
-# How many concurrent requests to run PER API KEY. Total concurrency
-# = WORKERS_PER_KEY * len(CLIENTS). Start conservative (4-8) and raise
-# it if the API tolerates more without throttling/erroring.
-WORKERS_PER_KEY = 1
-MAX_WORKERS = WORKERS_PER_KEY * len(CLIENTS)
+# How many texts the HF pipeline sends to the GPU at once. Raise
+# this if you have spare VRAM (speeds things up); lower it if you
+# hit out-of-memory errors.
+BATCH_SIZE = 16
 
 OUTPUT_DIR = "zero_shot_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ============================================================
+# DEVICE SETUP + PIPELINE (runs on GPU if available)
+# ============================================================
+
+DEVICE = 0 if torch.cuda.is_available() else -1
+
+if DEVICE == 0:
+    print(f"CUDA available - using GPU: {torch.cuda.get_device_name(0)}")
+else:
+    print("CUDA not available - falling back to CPU (this will be slow).")
+
+print(f"Loading zero-shot classification model: {MODEL_NAME} ...")
+classifier = pipeline(
+    "zero-shot-classification",
+    model=MODEL_NAME,
+    device=DEVICE,
+)
+print("Model loaded.\n")
 
 # ============================================================
 # DATASET URLS
@@ -151,7 +161,7 @@ def clean_dataframe(df):
 
 
 # ============================================================
-# SPACY / ENTITY EXTRACTION (batched for speed)
+# SPACY / ENTITY EXTRACTION (batched for speed, unchanged)
 # ============================================================
 
 nlp = spacy.load(
@@ -164,8 +174,6 @@ ORG_LABELS = {"ORG"}
 LOC_LABELS = {"LOC", "GPE"}
 TARGET_LABELS = PERSON_LABELS | ORG_LABELS | LOC_LABELS
 
-# spaCy batch size for nlp.pipe - higher batches amortize per-call
-# overhead. 128 is a reasonable default for short social media texts.
 SPACY_BATCH_SIZE = 128
 SPACY_N_PROCESS = 1  # bump if you have spare CPU cores and want multiprocessing in spaCy
 
@@ -246,10 +254,15 @@ def sample_entity(original, pool, rng):
 
 
 # ============================================================
-# MASKING STRATEGIES - EXACTLY THE SAME 7 STRATEGIES (unchanged)
+# MASKING STRATEGIES
+#
+# The 7 original masking strategies, PLUS a new "UNMASKED"
+# strategy that sends the raw text through untouched. This acts
+# as the baseline every masking strategy gets compared against.
 # ============================================================
 
 MASKING_STRATEGIES = [
+    "UNMASKED",
     "PER_ORG_LOC_GENERIC_ENTITY",
     "PER_ONLY",
     "ORG_ONLY",
@@ -262,7 +275,8 @@ MASKING_STRATEGIES = [
 
 def mask_text(text, entities, strategy, rng, entity_pools):
 
-    if strategy is None:
+    # "UNMASKED" (or None) means: leave the text exactly as-is.
+    if strategy is None or strategy == "UNMASKED":
         return text
 
     replacements = []
@@ -346,109 +360,46 @@ def mask_dataframe(df, strategy, seed, entity_pools):
 
 
 # ============================================================
-# ZERO-SHOT PROMPT + API CALL
+# ZERO-SHOT CLASSIFICATION (local model, GPU-batched)
 # ============================================================
 
-SYSTEM_PROMPT = (
-    "You are a strict text classifier for German social media text. "
-    "Decide whether the text is hate speech or not hate speech. "
-    "Reply with exactly one word: 'hate' or 'nothate'. "
-    "Do not explain your answer, do not add punctuation."
-)
-
-
-def build_user_prompt(text):
-    return f'Text: "{text}"\n\nLabel (hate or nothate):'
-
-
-def parse_label(response_text):
+def classify_batch_zero_shot(texts, batch_size=BATCH_SIZE):
     """
-    Turn the model's free-text reply into 0 (not hate) or 1 (hate).
-    Returns None if it can't be parsed, so the caller can retry.
+    Runs the local zero-shot-classification pipeline over a list
+    of texts. The HF pipeline batches internally (via `batch_size`)
+    when given a list, so the whole list is handed over in one call
+    and the GPU (if available) does the batching/parallel work.
+
+    Returns a list of (label, top_label_text, top_score) tuples in
+    the SAME ORDER as the input texts, where `label` is 1 if the
+    top-scoring candidate label is "Hassrede" (hate) and 0 otherwise.
     """
 
-    if response_text is None:
-        return None
+    if len(texts) == 0:
+        return []
 
-    answer = response_text.strip().lower()
-    answer = re.sub(r"[^a-z]", "", answer)  # strip punctuation/whitespace
+    raw_results = classifier(
+        texts,
+        candidate_labels=CANDIDATE_LABELS,
+        hypothesis_template=HYPOTHESIS_TEMPLATE,
+        batch_size=batch_size,
+        multi_label=False,
+    )
 
-    if "nothate" in answer or answer.startswith("not"):
-        return 0
-    if "hate" in answer:
-        return 1
+    # The pipeline returns a single dict if given a single string,
+    # but we always pass a list, so this should already be a list -
+    # this guard just makes the function robust either way.
+    if isinstance(raw_results, dict):
+        raw_results = [raw_results]
 
-    return None
+    parsed = []
+    for res in raw_results:
+        top_label = res["labels"][0]
+        top_score = res["scores"][0]
+        label = 1 if top_label == "Hassrede" else 0
+        parsed.append((label, top_label, top_score))
 
-
-def classify_text(text, client):
-    """
-    Calls the SAIA API for one document using the given client
-    (so different threads can be pinned to different API keys).
-    Retries on failure or on an unparseable answer. Falls back to
-    label 0 if nothing works.
-    """
-
-    for attempt in range(MAX_RETRIES):
-
-        try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": build_user_prompt(text)},
-                ],
-                max_tokens=5,
-                temperature=0.0,
-            )
-
-            raw_answer = response.choices[0].message.content
-            label = parse_label(raw_answer)
-
-            if label is not None:
-                return label, raw_answer
-
-        except Exception as e:
-            print(f"  API error (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-            time.sleep(2 * (attempt + 1))
-
-    return 0, "PARSE_FAILED"
-
-
-def classify_batch_parallel(texts, clients, max_workers):
-    """
-    Classifies a list of texts concurrently using a thread pool.
-    Each task is assigned a client round-robin across the provided
-    API keys/clients, so load is split roughly evenly between keys.
-
-    Returns a list of (label, raw_answer) tuples in the SAME ORDER
-    as the input texts (order is preserved even though completion
-    order is not).
-    """
-
-    n = len(texts)
-    results = [None] * n
-
-    def _worker(idx):
-        client = clients[idx % len(clients)]
-        label, raw_answer = classify_text(texts[idx], client)
-        if REQUEST_DELAY > 0:
-            time.sleep(REQUEST_DELAY)
-        return idx, label, raw_answer
-
-    completed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_worker, i) for i in range(n)]
-
-        for future in concurrent.futures.as_completed(futures):
-            idx, label, raw_answer = future.result()
-            results[idx] = (label, raw_answer)
-
-            completed += 1
-            if completed % 50 == 0 or completed == n:
-                print(f"  {completed}/{n} documents classified")
-
-    return results
+    return parsed
 
 
 # ============================================================
@@ -526,7 +477,7 @@ def run_zero_shot():
         for strategy in MASKING_STRATEGIES:
 
             print("=" * 70)
-            print(f"{dataset_name} | Strategy: {strategy} | N={len(df)} | workers={MAX_WORKERS}")
+            print(f"{dataset_name} | Strategy: {strategy} | N={len(df)} | batch_size={BATCH_SIZE}")
             print("=" * 70)
 
             masked_df = mask_dataframe(
@@ -537,13 +488,13 @@ def run_zero_shot():
             )
 
             texts = masked_df["text"].tolist()
-            results = classify_batch_parallel(texts, CLIENTS, MAX_WORKERS)
+            results = classify_batch_zero_shot(texts, batch_size=BATCH_SIZE)
 
             y_true = masked_df["label"].tolist()
-            y_pred = [label for label, _ in results]
+            y_pred = [label for label, _, _ in results]
 
             for i, row in enumerate(masked_df.itertuples(index=False)):
-                label, raw_answer = results[i]
+                label, top_label_text, top_score = results[i]
                 all_predictions.append({
                     "Dataset": dataset_name,
                     "Strategy": strategy,
@@ -551,7 +502,8 @@ def run_zero_shot():
                     "Text": row.text,
                     "TrueLabel": row.label,
                     "PredictedLabel": label,
-                    "RawModelAnswer": raw_answer,
+                    "PredictedLabelText": top_label_text,
+                    "Score": top_score,
                 })
 
             metrics = compute_metrics(y_true, y_pred)
