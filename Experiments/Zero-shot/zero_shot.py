@@ -1,42 +1,4 @@
-# ============================================================
-# HATE SPEECH CLASSIFICATION - ZERO-SHOT LEARNING
-# GERMAN DATASETS: GERMEVAL, HASOC, GAHD
-#
-# Model: joeddav/xlm-roberta-large-xnli (local, via HF `transformers`
-# zero-shot-classification pipeline, running on GPU)
-#
-# LOCAL-MODEL VERSION (replaces the previous SAIA-API version):
-#   - No API keys / network calls for classification anymore -
-#     the model runs locally, so all the API-key / round-robin /
-#     thread-pool machinery has been removed.
-#   - Classification is instead batched: all texts for a given
-#     (dataset, strategy) combo are handed to the HF pipeline at
-#     once, which internally batches them onto the GPU
-#     (see BATCH_SIZE below). This is the "parallelism" now -
-#     there's no I/O wait to hide behind threads, so threading
-#     wouldn't help here.
-#   - Batches spaCy NER with nlp.pipe instead of per-row .apply
-#     (unchanged from before).
-#   - Adds an "UNMASKED" strategy (alongside the 7 masking
-#     strategies) that sends the raw, unmasked text - useful as
-#     a baseline to compare all the masking strategies against.
-#   - Runs on the FULL dataset when MAX_SAMPLES_PER_DATASET = None.
-#
-# No training happens here. Every document in every dataset is
-# masked according to one of the 7 masking strategies (or left
-# unmasked) and classified zero-shot against two candidate labels.
-#
-# Install once:
-#   pip install transformers torch spacy pandas scikit-learn emoji
-#   python -m spacy download de_core_news_lg
-#
-# NOTE: joeddav/xlm-roberta-large-xnli is a large (~2.2GB) model.
-# Make sure you have a CUDA-capable GPU with enough free VRAM
-# (a few GB is generally enough for inference at modest batch
-# sizes). The script falls back to CPU automatically if no GPU
-# is found, but that will be much slower.
-# ============================================================
-
+import gc
 import os
 import re
 import random
@@ -65,11 +27,19 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
-MODEL_NAME = "joeddav/xlm-roberta-large-xnli"
+# Every model here is run through the FULL (dataset x strategy)
+# evaluation, one at a time, in this order. Add/remove entries to
+# change which models get compared. Keys are short display names
+# used in the results tables; values are the HF model IDs.
+MODELS_TO_RUN = {
+    "xlm-roberta-large-xnli": "joeddav/xlm-roberta-large-xnli",
+    "deberta-v3-nli": "MoritzLaurer/deberta-v3-large-zeroshot-v2.0",
+}
 
-# German candidate labels + hypothesis template. xlm-roberta-large-xnli
-# is multilingual, so we phrase the hypothesis in German to match the
-# domain (German social media text) as closely as possible.
+# German candidate labels + hypothesis template. Both models above
+# are multilingual/German-capable, so we phrase the hypothesis in
+# German to match the domain (German social media text) as closely
+# as possible.
 CANDIDATE_LABELS = ["Hassrede", "keine Hassrede"]
 HYPOTHESIS_TEMPLATE = "Dieser Text ist {}."
 
@@ -86,7 +56,7 @@ OUTPUT_DIR = "zero_shot_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ============================================================
-# DEVICE SETUP + PIPELINE (runs on GPU if available)
+# DEVICE SETUP
 # ============================================================
 
 DEVICE = 0 if torch.cuda.is_available() else -1
@@ -96,13 +66,33 @@ if DEVICE == 0:
 else:
     print("CUDA not available - falling back to CPU (this will be slow).")
 
-print(f"Loading zero-shot classification model: {MODEL_NAME} ...")
-classifier = pipeline(
-    "zero-shot-classification",
-    model=MODEL_NAME,
-    device=DEVICE,
-)
-print("Model loaded.\n")
+
+def load_classifier(model_path):
+    """
+    Loads a zero-shot-classification pipeline for the given HF model
+    ID, on GPU if available. Call this once per model in
+    MODELS_TO_RUN; the caller is responsible for freeing it (see
+    unload_classifier) before loading the next one.
+    """
+
+    print(f"Loading zero-shot classification model: {model_path} ...")
+    clf = pipeline(
+        "zero-shot-classification",
+        model=model_path,
+        device=DEVICE,
+    )
+    print("Model loaded.\n")
+    return clf
+
+
+def unload_classifier(clf):
+    """Frees GPU memory held by a loaded pipeline before loading the next one."""
+
+    del clf
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 
 # ============================================================
 # DATASET URLS
@@ -256,9 +246,9 @@ def sample_entity(original, pool, rng):
 # ============================================================
 # MASKING STRATEGIES
 #
-# The 7 original masking strategies, PLUS a new "UNMASKED"
-# strategy that sends the raw text through untouched. This acts
-# as the baseline every masking strategy gets compared against.
+# The 7 original masking strategies, PLUS the "UNMASKED" strategy
+# that sends the raw text through untouched. This acts as the
+# baseline every masking strategy gets compared against.
 # ============================================================
 
 MASKING_STRATEGIES = [
@@ -363,12 +353,13 @@ def mask_dataframe(df, strategy, seed, entity_pools):
 # ZERO-SHOT CLASSIFICATION (local model, GPU-batched)
 # ============================================================
 
-def classify_batch_zero_shot(texts, batch_size=BATCH_SIZE):
+def classify_batch_zero_shot(classifier, texts, batch_size=BATCH_SIZE):
     """
-    Runs the local zero-shot-classification pipeline over a list
-    of texts. The HF pipeline batches internally (via `batch_size`)
-    when given a list, so the whole list is handed over in one call
-    and the GPU (if available) does the batching/parallel work.
+    Runs the given local zero-shot-classification pipeline over a
+    list of texts. The HF pipeline batches internally (via
+    `batch_size`) when given a list, so the whole list is handed
+    over in one call and the GPU (if available) does the
+    batching/parallel work.
 
     Returns a list of (label, top_label_text, top_score) tuples in
     the SAME ORDER as the input texts, where `label` is 1 if the
@@ -459,70 +450,88 @@ def load_and_prepare_datasets():
 
 
 # ============================================================
-# MAIN ZERO-SHOT LOOP
+# MAIN ZERO-SHOT LOOP (now: one outer pass per model)
 # ============================================================
 
 def run_zero_shot():
 
+    # Datasets (+ NER) are computed ONCE and reused for every model.
     datasets = load_and_prepare_datasets()
+
+    entity_pools_by_dataset = {
+        dataset_name: build_entity_pools(df)
+        for dataset_name, df in datasets.items()
+    }
 
     all_predictions = []
     all_metrics = []
 
-    for dataset_name, df in datasets.items():
+    for model_name, model_path in MODELS_TO_RUN.items():
 
-        # Built from the whole dataset since there's no train/test split
-        entity_pools = build_entity_pools(df)
+        print("#" * 70)
+        print(f"# MODEL: {model_name}  ({model_path})")
+        print("#" * 70)
 
-        for strategy in MASKING_STRATEGIES:
+        classifier = load_classifier(model_path)
 
-            print("=" * 70)
-            print(f"{dataset_name} | Strategy: {strategy} | N={len(df)} | batch_size={BATCH_SIZE}")
-            print("=" * 70)
+        for dataset_name, df in datasets.items():
 
-            masked_df = mask_dataframe(
-                df,
-                strategy,
-                seed=SEED,
-                entity_pools=entity_pools,
-            )
+            entity_pools = entity_pools_by_dataset[dataset_name]
 
-            texts = masked_df["text"].tolist()
-            results = classify_batch_zero_shot(texts, batch_size=BATCH_SIZE)
+            for strategy in MASKING_STRATEGIES:
 
-            y_true = masked_df["label"].tolist()
-            y_pred = [label for label, _, _ in results]
+                print("=" * 70)
+                print(f"[{model_name}] {dataset_name} | Strategy: {strategy} | N={len(df)} | batch_size={BATCH_SIZE}")
+                print("=" * 70)
 
-            for i, row in enumerate(masked_df.itertuples(index=False)):
-                label, top_label_text, top_score = results[i]
-                all_predictions.append({
+                masked_df = mask_dataframe(
+                    df,
+                    strategy,
+                    seed=SEED,
+                    entity_pools=entity_pools,
+                )
+
+                texts = masked_df["text"].tolist()
+                results = classify_batch_zero_shot(classifier, texts, batch_size=BATCH_SIZE)
+
+                y_true = masked_df["label"].tolist()
+                y_pred = [label for label, _, _ in results]
+
+                for i, row in enumerate(masked_df.itertuples(index=False)):
+                    label, top_label_text, top_score = results[i]
+                    all_predictions.append({
+                        "Model": model_name,
+                        "Dataset": dataset_name,
+                        "Strategy": strategy,
+                        "Index": i,
+                        "Text": row.text,
+                        "TrueLabel": row.label,
+                        "PredictedLabel": label,
+                        "PredictedLabelText": top_label_text,
+                        "Score": top_score,
+                    })
+
+                metrics = compute_metrics(y_true, y_pred)
+
+                row_result = {
+                    "Model": model_name,
                     "Dataset": dataset_name,
                     "Strategy": strategy,
-                    "Index": i,
-                    "Text": row.text,
-                    "TrueLabel": row.label,
-                    "PredictedLabel": label,
-                    "PredictedLabelText": top_label_text,
-                    "Score": top_score,
-                })
+                    "N": len(masked_df),
+                }
+                row_result.update(metrics)
+                all_metrics.append(row_result)
 
-            metrics = compute_metrics(y_true, y_pred)
+                print(f"Accuracy: {metrics['Accuracy']:.4f} | Macro F1: {metrics['F1_macro']:.4f}\n")
 
-            row_result = {
-                "Dataset": dataset_name,
-                "Strategy": strategy,
-                "N": len(masked_df),
-            }
-            row_result.update(metrics)
-            all_metrics.append(row_result)
-
-            print(f"Accuracy: {metrics['Accuracy']:.4f} | Macro F1: {metrics['F1_macro']:.4f}\n")
+        # Free GPU memory before loading the next model.
+        unload_classifier(classifier)
 
     return all_predictions, all_metrics
 
 
 # ============================================================
-# SAVE RESULTS (unchanged)
+# SAVE RESULTS
 # ============================================================
 
 def save_results(all_predictions, all_metrics):
@@ -537,10 +546,10 @@ def save_results(all_predictions, all_metrics):
     metrics_df.to_csv(metrics_path, index=False)
     print(f"Saved {metrics_path}")
 
-    for dataset_name in metrics_df["Dataset"].unique():
-        dataset_metrics = metrics_df[metrics_df["Dataset"] == dataset_name]
-        out_path = os.path.join(OUTPUT_DIR, f"{dataset_name}_RESULTS.csv")
-        dataset_metrics.to_csv(out_path, index=False)
+    for (model_name, dataset_name), group in metrics_df.groupby(["Model", "Dataset"]):
+        safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", model_name)
+        out_path = os.path.join(OUTPUT_DIR, f"{safe_model}_{dataset_name}_RESULTS.csv")
+        group.to_csv(out_path, index=False)
         print(f"Saved {out_path}")
 
     ranking = metrics_df.sort_values("F1_macro", ascending=False)
@@ -548,8 +557,17 @@ def save_results(all_predictions, all_metrics):
     ranking.to_csv(ranking_path, index=False)
     print(f"Saved {ranking_path}")
 
-    print("\nTop configurations by Macro F1:")
-    print(ranking[["Dataset", "Strategy", "F1_macro", "Accuracy"]].head(10).to_string(index=False))
+    print("\nTop configurations by Macro F1 (across all models):")
+    print(ranking[["Model", "Dataset", "Strategy", "F1_macro", "Accuracy"]].head(15).to_string(index=False))
+
+    print("\nBest strategy per model (by mean Macro F1 across datasets):")
+    best_per_model = (
+        metrics_df.groupby(["Model", "Strategy"])["F1_macro"]
+        .mean()
+        .reset_index()
+        .sort_values(["Model", "F1_macro"], ascending=[True, False])
+    )
+    print(best_per_model.groupby("Model").head(1).to_string(index=False))
 
     return metrics_df
 
