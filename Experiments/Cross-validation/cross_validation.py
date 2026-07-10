@@ -96,13 +96,13 @@ MODELS = {
 
     # Uncomment as desired
 
-    # "GELECTRA_BASE": "deepset/gelectra-base",
+    "GELECTRA_BASE": "deepset/gelectra-base",
 
-    # "BERT_GERMAN": "bert-base-german-cased",
+    "BERT_GERMAN": "bert-base-german-cased",
 
-    # "XLM_ROBERTA": "xlm-roberta-base",
+    "XLM_ROBERTA": "xlm-roberta-base",
 
-    # "XLM_ROBERTA_LARGE": "xlm-roberta-large",
+    "XLM_ROBERTA_LARGE": "xlm-roberta-large",
 }
 
 # ============================================================
@@ -124,43 +124,28 @@ SPECIAL_TOKENS = {
 
 MASKING_STRATEGIES = [
 
-    "PER_ORG_LOC_GENERIC_ENTITY",
+    "UNMASKED",
 
-    "PER_ONLY",
+    #"PER_ORG_LOC_GENERIC_ENTITY",
 
-    "ORG_ONLY",
+    #"PER_ONLY",
 
-    "LOC_ONLY",
+    #"ORG_ONLY",
 
-    "PER_ORG_LOC_TYPED",
+    #"LOC_ONLY",
 
-    "X_LENGTH",
+    #"PER_ORG_LOC_TYPED",
 
-    "RANDOM_SUBSTITUTION",
+    #"X_LENGTH",
+
+    #"RANDOM_SUBSTITUTION",
 ]
 
 STRATEGY_TAGS = {
 
-    "PER_ORG_LOC_GENERIC_ENTITY":
-        "per_org_loc_generic_entity",
+    "UNMASKED":
+        "unmasked",
 
-    "PER_ONLY":
-        "per_only",
-
-    "ORG_ONLY":
-        "org_only",
-
-    "LOC_ONLY":
-        "loc_only",
-
-    "PER_ORG_LOC_TYPED":
-        "per_org_loc_typed",
-
-    "X_LENGTH":
-        "x_length",
-
-    "RANDOM_SUBSTITUTION":
-        "random_substitution",
 }
 
 # ============================================================
@@ -1409,18 +1394,14 @@ print("\nFinished all experiments.")
 
 print("\nSaving results...")
 
-results_df = pd.DataFrame(all_results).to_csv(
+results_df = pd.DataFrame(all_results)
 
+results_df.to_csv(
     os.path.join(
-
         OUTPUT_DIR,
-
         "ALL_FOLDS_BACKUP.csv",
-
     ),
-
     index=False,
-
 )
 
 # ------------------------------------------------------------
