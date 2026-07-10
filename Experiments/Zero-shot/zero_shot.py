@@ -61,8 +61,8 @@ np.random.seed(SEED)
 API_KEY_1 = os.environ.get("SAIA_API_KEY_1", "256a34825e9fbf26a3d9e31c096a0c86")
 API_KEY_2 = os.environ.get("SAIA_API_KEY_2", "57445dacfe7afa67232c1b82ea596532")
 
-API_BASE_URL = "https://openrouter.ai/api/v1"
-MODEL_NAME = "mistralai/mistral-large"
+API_BASE_URL = "https://chat-ai.academiccloud.de/v1"
+MODEL_NAME = "mistral-large-3-675b-instruct-2512"
 
 _raw_keys = [API_KEY_1, API_KEY_2]
 API_KEYS = [k for k in _raw_keys if k]
